@@ -1,9 +1,9 @@
-#Chevereto v3.6+ => Reservo Migration Script
+#Chevereto v3.12.10+ => Reservo Migration Script
 
 * Created By: Adam Wilson - Reservo.co
 * Website: https://reservo.co
-* Release Date: 11th November 2015
-* Version: 1.0
+* Release Date: 2nd April 2019
+* Version: 1.1
 
 #USAGE:
 
