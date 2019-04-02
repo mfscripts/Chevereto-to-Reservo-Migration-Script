@@ -1,9 +1,9 @@
 <?php
 /*
- * Chevereto v3.6+ => Reservo Migration Script.
+ * Chevereto v3.12.10+ => Reservo Migration Script.
  * 
  * Mirgration script for converting users, images and stats data
- * from Chevereto v3.6+. Set the config values below, upload this
+ * from Chevereto v3.12.10+. Set the config values below, upload this
  * script to the base of your Reservo install and load it within
  * a browser.
  * 
@@ -11,17 +11,17 @@
  * MySQL PDO
  * Reservo installed
  *
- * This has been tested with Chevereto v3.6 although it may also
+ * This has been tested with Chevereto v3.12.10 although it may also
  * work with other versions.
  */
 
-// Chevereto v3.6 - database settings
+// Chevereto v3.12.10 - database settings
 define('CHEVERETO_DB_HOST', 'localhost');
 define('CHEVERETO_DB_NAME', '');
 define('CHEVERETO_DB_USER', '');
 define('CHEVERETO_DB_PASS', '');
 
-// Chevereto v3.6 - database table prefix
+// Chevereto v3.12.10 - database table prefix
 define('CHEVERETO_DB_TABLE_PREFIX', 'chv_');
 
 // Reservo - config file path
@@ -49,6 +49,9 @@ require_once(RESERVO_CONFIG_FILE_PATH);
 try
 {
     $ysDBH = new PDO("mysql:host=" . _CONFIG_DB_HOST . ";dbname=" . _CONFIG_DB_NAME, _CONFIG_DB_USER, _CONFIG_DB_PASS);
+	// error handling
+	//$ysDBH->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$ysDBH->exec("SET sql_mode = ''");
     $ysDBH->exec("set names utf8");
 }
 catch (PDOException $e)
@@ -100,7 +103,7 @@ $row                     = $getSetting->fetchObject();
 define("CHEVERETO_CRYPT_SALT", $row->setting_value);
 
 // page setup
-define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
+define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
 ?>
 
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
@@ -393,7 +396,6 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
                         $ysDBH->query('DELETE FROM file_folder');
                         $ysDBH->query('DELETE FROM payment_log');
                         $ysDBH->query('DELETE FROM sessions');
-                        $ysDBH->query('DELETE FROM session_transfer');
                         $ysDBH->query('DELETE FROM stats');
                         $ysDBH->query('DELETE FROM users');
 						$ysDBH->query('DELETE FROM banned_ips');
@@ -403,9 +405,11 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
 						$ysDBH->query('DELETE FROM file_server');
 						
 						// create local server entry
-						$sql   = "INSERT INTO `file_server` (`id`, `serverLabel`, `serverType`, `ipAddress`, `ftpPort`, `ftpUsername`, `ftpPassword`, `statusId`, `storagePath`, `fileServerDomainName`, `scriptPath`, `totalSpaceUsed`, `maximumStorageBytes`, `priority`, `routeViaMainSite`, `lastFileActionQueueProcess`, `serverConfig`) VALUES (1, 'Local Default', 'local', '', 0, '', NULL, 2, NULL, NULL, NULL, 0, 0, 0, 0, '0000-00-00 00:00:00', NULL);";
+						$sql   = "INSERT INTO `file_server` (`id`, `serverLabel`, `serverType`, `ipAddress`, `ftpPort`, `ftpUsername`, `ftpPassword`, `statusId`, `scriptRootPath`, `storagePath`, `fileServerDomainName`, `scriptPath`, `totalSpaceUsed`, `maximumStorageBytes`, `priority`, `routeViaMainSite`, `lastFileActionQueueProcess`, `serverConfig`) VALUES (1, 'Local Default', 'local', '', 0, '', NULL, 2, :scriptRootPath, 'files/', NULL, NULL, 0, 0, 0, 0, NULL, NULL);";
 						$q     = $ysDBH->prepare($sql);
-						$count = $q->execute();
+						$count = $q->execute(array(
+							':scriptRootPath' => getcwd(),
+						));
 
                         echo 'done.';
                         ?>
@@ -442,50 +446,69 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
 								$localFilePath = $filePrefix.$row['image_name'].'.'.$row['image_extension'];
 
                                 // insert into Reservo db
-                                $sql   = "INSERT INTO file (id, originalFilename, shortUrl, fileType, extension, fileSize, localFilePath, userId, totalDownload, uploadedIP, uploadedDate, statusId, visits, lastAccessed, deleteHash, folderId, serverId, accessPassword) VALUES (:id, :originalFilename, :shortUrl, :fileType, :extension, :fileSize, :localFilePath, :userId, :totalDownload, :uploadedIP, :uploadedDate, :statusId, :visits, :lastAccessed, :deleteHash, :folderId, :serverId, :accessPassword)";
+                                $sql   = "INSERT INTO file (id, originalFilename, shortUrl, fileType, extension, fileSize, localFilePath, userId, totalDownload, uploadedIP, uploadedDate, status, visits, lastAccessed, deleteHash, folderId, serverId, accessPassword, apikey) VALUES (:id, :originalFilename, :shortUrl, :fileType, :extension, :fileSize, :localFilePath, :userId, :totalDownload, :uploadedIP, :uploadedDate, :status, :visits, :lastAccessed, :deleteHash, :folderId, :serverId, :accessPassword, '')";
                                 $q     = $ysDBH->prepare($sql);
-                                $count = $q->execute(array(
-                                    ':id'               => $row['image_id'],
-                                    ':originalFilename' => $row['image_original_filename'],
-                                    ':shortUrl'         => createShortUrl($row['image_id']),
-                                    ':fileType'         => guess_mime_type($row['image_original_filename']),
-                                    ':extension'        => strtolower($row['image_extension']),
-                                    ':fileSize'         => $row['image_size'],
-                                    ':localFilePath'    => $localFilePath,
-                                    ':userId'           => ((int)$row['image_user_id']==0?'null':$row['image_user_id']),
-                                    ':totalDownload'    => $row['image_views'],
-                                    ':uploadedIP'       => $row['image_uploader_ip'],
-                                    ':uploadedDate'     => $row['image_date'],
-                                    ':statusId'         => 1,
-                                    ':visits'           => $row['image_views'],
-                                    ':lastAccessed'     => date('Y-m-d H:i:s', time()),
-                                    ':deleteHash'       => MD5($row['image_md5'].$row['image_id'].rand(1000000,9999999)),
-                                    ':folderId'         => $row['image_album_id'],
-                                    ':serverId'         => $row['image_storage_id']==null?1:$row['image_storage_id'],
-                                    ':accessPassword'   => null,
-                                ));
-								
+								try
+								{
+
+									$count = $q->execute(array(
+										':id'               => $row['image_id'],
+										':originalFilename' => $row['image_original_filename'],
+										':shortUrl'         => createShortUrl($row['image_id']),
+										':fileType'         => guess_mime_type($row['image_original_filename']),
+										':extension'        => strtolower($row['image_extension']),
+										':fileSize'         => $row['image_size'],
+										':localFilePath'    => $localFilePath,
+										':userId'           => ((int)$row['image_user_id']==0?'null':$row['image_user_id']),
+										':totalDownload'    => $row['image_views'],
+										':uploadedIP'       => $row['image_uploader_ip'],
+										':uploadedDate'     => $row['image_date'],
+										':status'           => 'active',
+										':visits'           => $row['image_views'],
+										':lastAccessed'     => date('Y-m-d H:i:s', time()),
+										':deleteHash'       => MD5($row['image_md5'].$row['image_id'].rand(1000000,9999999)),
+										':folderId'         => $row['image_album_id'],
+										':serverId'         => $row['image_storage_id']==null?1:$row['image_storage_id'],
+										':accessPassword'   => null,
+									));
+								} catch(PDOException $e)
+								{
+									echo "Error " . $e->getMessage();
+								}
+
 								// add category record
 								if((int)$row['image_category_id'])
 								{
-									$sql   = "INSERT INTO plugin_imageviewer_category_file (file_id, category_id) VALUES (:file_id, :category_id)";
-									$q     = $ysDBH->prepare($sql);
-									$q->execute(array(
-										':file_id'          => $row['image_id'],
-										':category_id'      => (int)$row['image_category_id'],
-									));
+									try
+									{
+										$sql   = "INSERT INTO plugin_imageviewer_category_file (file_id, category_id) VALUES (:file_id, :category_id)";
+										$q     = $ysDBH->prepare($sql);
+										$q->execute(array(
+											':file_id'          => $row['image_id'],
+											':category_id'      => (int)$row['image_category_id'],
+										));
+									} catch(PDOException $e)
+									{
+										echo "Error " . $e->getMessage();
+									}
 								}
 
-								// add meta record
-								$sql   = "INSERT INTO plugin_imageviewer_meta (file_id, width, height, raw_data, date_taken) VALUES (:file_id, :width, :height, :raw_data, :date_taken)";
-								$q     = $ysDBH->prepare($sql);
-								$q->execute(array(
-									':file_id'    => $row['image_id'],
-									':width'      => (int)$row['image_width'],
-									':height'     => (int)$row['image_height'],
-									':raw_data'   => $row['image_original_exifdata'],
-									':date_taken' => $row['image_date'],
-								));
+								try
+								{
+									// add meta record
+									$sql   = "INSERT INTO plugin_imageviewer_meta (file_id, width, height, raw_data, date_taken) VALUES (:file_id, :width, :height, :raw_data, :date_taken)";
+									$q     = $ysDBH->prepare($sql);
+									$q->execute(array(
+										':file_id'    => $row['image_id'],
+										':width'      => (int)$row['image_width'],
+										':height'     => (int)$row['image_height'],
+										':raw_data'   => $row['image_original_exifdata'],
+										':date_taken' => $row['image_date'],
+									));
+								} catch(PDOException $e)
+								{
+									echo "Error " . $e->getMessage();
+								}
 
                                 if ($count)
                                 {
@@ -514,7 +537,7 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
                             while($row = $getUsers->fetch())
                             {
                                 // insert into Reservo db
-                                $sql       = "INSERT INTO users (id, username, password, level_id, email, lastlogindate, lastloginip, status, datecreated, createdip, identifier) VALUES (:id, :username, :password, :level_id, :email, :lastlogindate, :lastloginip, :status, :datecreated, :createdip, :identifier)";
+                                $sql       = "INSERT INTO users (id, username, password, level_id, email, lastlogindate, lastloginip, status, datecreated, createdip, identifier, title, firstname, lastname) VALUES (:id, :username, :password, :level_id, :email, :lastlogindate, :lastloginip, :status, :datecreated, :createdip, :identifier, '', '', '')";
                                 $q         = $ysDBH->prepare($sql);
                                 $userLevel = 1;
 								$randomPassword = MD5(MD5(microtime().rand(10000,99999).microtime()));
@@ -552,19 +575,25 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
 									$loginIp = $passwordRow['login_ip'];
 								}
 
-                                $count = $q->execute(array(
-                                    ':id'             => $row['user_id'],
-                                    ':username'       => $row['user_username'],
-                                    ':password'       => $randomPassword,
-                                    ':level_id'       => $userLevel,
-                                    ':email'          => $row['user_email'],
-                                    ':lastlogindate'  => $loginDate,
-                                    ':lastloginip'    => $loginIp,
-                                    ':status'         => $status,
-                                    ':datecreated'    => $row['user_date'],
-                                    ':createdip'      => long2Ip32bit($row['usr_lastip']),
-                                    ':identifier'     => MD5(microtime() . $row['user_id'] . microtime()),
-                                ));
+								try
+								{
+									$count = $q->execute(array(
+										':id'             => $row['user_id'],
+										':username'       => $row['user_username'],
+										':password'       => $randomPassword,
+										':level_id'       => $userLevel,
+										':email'          => $row['user_email'],
+										':lastlogindate'  => $loginDate,
+										':lastloginip'    => $loginIp,
+										':status'         => $status,
+										':datecreated'    => $row['user_date'],
+										':createdip'      => long2Ip32bit($row['usr_lastip']),
+										':identifier'     => MD5(microtime() . $row['user_id'] . microtime()),
+									));
+								} catch(PDOException $e)
+								{
+									echo "Error " . $e->getMessage();
+								}
 
 								if($q->errorCode() == 0)
 								{
@@ -607,16 +636,22 @@ define('PAGE_TITLE', 'Chevereto 3.6+ => Reservo Migration Tool');
 									$isPublic = 0;
 								}
 								
-                                // insert into Reservo db
-                                $sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added) VALUES (:id, :userId, :folderName, :isPublic, :date_added)";
-                                $q     = $ysDBH->prepare($sql);
-                                $count = $q->execute(array(
-                                    ':id'         => $row['album_id'],
-                                    ':userId'     => $row['album_user_id'],
-                                    ':folderName' => $row['album_name'],
-                                    ':isPublic'   => $isPublic,
-									':date_added' => $row['album_date'],
-                                ));
+								try
+								{
+									// insert into Reservo db
+									$sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added) VALUES (:id, :userId, :folderName, :isPublic, :date_added)";
+									$q     = $ysDBH->prepare($sql);
+									$count = $q->execute(array(
+										':id'         => $row['album_id'],
+										':userId'     => $row['album_user_id'],
+										':folderName' => $row['album_name'],
+										':isPublic'   => $isPublic,
+										':date_added' => $row['album_date'],
+									));
+								} catch(PDOException $e)
+								{
+									echo "Error " . $e->getMessage();
+								}
 
                                 if ($count)
                                 {
