@@ -17,9 +17,9 @@
 
 // Chevereto v3.12.10 - database settings
 define('CHEVERETO_DB_HOST', 'localhost');
-define('CHEVERETO_DB_NAME', '');
-define('CHEVERETO_DB_USER', '');
-define('CHEVERETO_DB_PASS', '');
+define('CHEVERETO_DB_NAME', 'test_area_chev');
+define('CHEVERETO_DB_USER', 'root');
+define('CHEVERETO_DB_PASS', 'root');
 
 // Chevereto v3.12.10 - database table prefix
 define('CHEVERETO_DB_TABLE_PREFIX', 'chv_');
@@ -70,40 +70,39 @@ catch (PDOException $e)
     die('ERROR: Could not connect to Chevereto database. ' . $e->getMessage());
 }
 
-// initial checks passed, load stats for converting and get user confirmation
-$chevStats = array();
-
-// files
-$getFiles               = $chevDBH->query('SELECT COUNT(image_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'images');
-$row                    = $getFiles->fetchObject();
-$chevStats['totalFiles'] = (int) $row->total;
-
-// users
-$getUsers               = $chevDBH->query('SELECT COUNT(user_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'users');
-$row                    = $getUsers->fetchObject();
-$chevStats['totalUsers'] = (int) $row->total;
-
-// folders
-$getFolders               = $chevDBH->query('SELECT COUNT(album_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'albums');
-$row                      = $getFolders->fetchObject();
-$chevStats['totalFolders'] = (int) $row->total;
-
-// banned ips
-$getIpBans               = $chevDBH->query('SELECT COUNT(ip_ban_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'ip_bans');
-$row                     = $getIpBans->fetchObject();
-$chevStats['totalIpBans'] = (int) $row->total;
-
-// categories
-$getCategories               = $chevDBH->query('SELECT COUNT(category_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'categories');
-$row                     = $getCategories->fetchObject();
-$chevStats['totalCategories'] = (int) $row->total;
-
+// get the salt
 $getSetting              = $chevDBH->query('SELECT setting_value FROM '.CHEVERETO_DB_TABLE_PREFIX.'settings WHERE setting_name = \'crypt_salt\' LIMIT 1');
 $row                     = $getSetting->fetchObject();
 define("CHEVERETO_CRYPT_SALT", $row->setting_value);
 
 // page setup
 define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
+define('OUTPUT_BATCH_SIZE', 10000);
+
+// handle whether this is a web based import or command line
+if (php_sapi_name() === "cli") {
+    // in cli-mode
+	processCommandLineConversion($chevDBH, $ysDBH);
+	exit;
+}
+
+// initial checks passed, load stats for converting and get user confirmation
+$chevStats = array();
+
+// files
+$chevStats['totalFiles'] = getTotalChevFilesCount($chevDBH);
+
+// users
+$chevStats['totalUsers'] = getTotalChevUsersCount($chevDBH);
+
+// folders
+$chevStats['totalFolders'] = getTotalChevFoldersCount($chevDBH);
+
+// banned ips
+$chevStats['totalIpBans'] = getTotalChevBannedIpsCount($chevDBH);
+
+// categories
+$chevStats['totalCategories'] = getTotalChevCategoriesCount($chevDBH);
 ?>
 
 <html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
@@ -383,6 +382,9 @@ define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
                             <input type="submit" value="Start Migration" name="submit" class="button" onClick="return confirm('Are you sure you want to delete all the data from your Reservo database and import from the Chevereto database?\n\nYour users will need to request a password reset via Reservo once their data is migrated.');"/>
                         </form>
                     </p>
+					<p style="padding-top: 30px;">
+						<strong>Command Line Method:</strong> If you have a large database or you're having timeout issues on import, we recommend using this script via the command line. Call it via SSH like this - "php migrate.php".
+					</p>
                 <?php else: ?>
                     <h2>
                         Importing Data
@@ -391,25 +393,10 @@ define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
                         Clearing existing Reservo data... 
                         <?php
                         // delete Reservo data
-                        $ysDBH->query('DELETE FROM download_tracker');
-                        $ysDBH->query('DELETE FROM file');
-                        $ysDBH->query('DELETE FROM file_folder');
-                        $ysDBH->query('DELETE FROM payment_log');
-                        $ysDBH->query('DELETE FROM sessions');
-                        $ysDBH->query('DELETE FROM stats');
-                        $ysDBH->query('DELETE FROM users');
-						$ysDBH->query('DELETE FROM banned_ips');
-						$ysDBH->query('DELETE FROM plugin_imageviewer_category');
-						$ysDBH->query('DELETE FROM plugin_imageviewer_category_file');
-						$ysDBH->query('DELETE FROM plugin_imageviewer_meta');
-						$ysDBH->query('DELETE FROM file_server');
+                        deleteResevoData($ysDBH);
 						
 						// create local server entry
-						$sql   = "INSERT INTO `file_server` (`id`, `serverLabel`, `serverType`, `ipAddress`, `ftpPort`, `ftpUsername`, `ftpPassword`, `statusId`, `scriptRootPath`, `storagePath`, `fileServerDomainName`, `scriptPath`, `totalSpaceUsed`, `maximumStorageBytes`, `priority`, `routeViaMainSite`, `lastFileActionQueueProcess`, `serverConfig`) VALUES (1, 'Local Default', 'local', '', 0, '', NULL, 2, :scriptRootPath, 'files/', NULL, NULL, 0, 0, 0, 0, NULL, NULL);";
-						$q     = $ysDBH->prepare($sql);
-						$count = $q->execute(array(
-							':scriptRootPath' => getcwd(),
-						));
+						createLocalServerEntry($ysDBH);
 
                         echo 'done.';
                         ?>
@@ -427,321 +414,66 @@ define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
 
                             <?php
                             // do images
-                            $getFiles       = $chevDBH->query('SELECT image_id, image_user_id, image_original_filename, image_extension, image_album_id, image_md5, image_views, image_size, image_uploader_ip, image_date, image_storage_id, image_name, image_storage_mode, image_original_exifdata, image_width, image_height, image_category_id FROM '.CHEVERETO_DB_TABLE_PREFIX.'images');
-                            $success        = 0;
-                            $error          = 0;
-							while($row = $getFiles->fetch())
-                            {
-								$image_storage_mode = $row['image_storage_mode'];
-								$filePrefix = '';
-								switch($image_storage_mode)
-								{
-									case 'datefolder':
-										$filePrefix = preg_replace('/(.*)(\s.*)/', '$1', str_replace('-', '/', $row['image_date'])).'/';
-										break;
-									case 'old':
-										$filePrefix = 'old/';
-										break;
-								}
-								$localFilePath = $filePrefix.$row['image_name'].'.'.$row['image_extension'];
-
-                                // insert into Reservo db
-                                $sql   = "INSERT INTO file (id, originalFilename, shortUrl, fileType, extension, fileSize, localFilePath, userId, totalDownload, uploadedIP, uploadedDate, status, visits, lastAccessed, deleteHash, folderId, serverId, accessPassword, apikey) VALUES (:id, :originalFilename, :shortUrl, :fileType, :extension, :fileSize, :localFilePath, :userId, :totalDownload, :uploadedIP, :uploadedDate, :status, :visits, :lastAccessed, :deleteHash, :folderId, :serverId, :accessPassword, '')";
-                                $q     = $ysDBH->prepare($sql);
-								try
-								{
-
-									$count = $q->execute(array(
-										':id'               => $row['image_id'],
-										':originalFilename' => $row['image_original_filename'],
-										':shortUrl'         => createShortUrl($row['image_id']),
-										':fileType'         => guess_mime_type($row['image_original_filename']),
-										':extension'        => strtolower($row['image_extension']),
-										':fileSize'         => $row['image_size'],
-										':localFilePath'    => $localFilePath,
-										':userId'           => ((int)$row['image_user_id']==0?'null':$row['image_user_id']),
-										':totalDownload'    => $row['image_views'],
-										':uploadedIP'       => $row['image_uploader_ip'],
-										':uploadedDate'     => $row['image_date'],
-										':status'           => 'active',
-										':visits'           => $row['image_views'],
-										':lastAccessed'     => date('Y-m-d H:i:s', time()),
-										':deleteHash'       => MD5($row['image_md5'].$row['image_id'].rand(1000000,9999999)),
-										':folderId'         => $row['image_album_id'],
-										':serverId'         => $row['image_storage_id']==null?1:$row['image_storage_id'],
-										':accessPassword'   => null,
-									));
-								} catch(PDOException $e)
-								{
-									echo "Error " . $e->getMessage();
-								}
-
-								// add category record
-								if((int)$row['image_category_id'])
-								{
-									try
-									{
-										$sql   = "INSERT INTO plugin_imageviewer_category_file (file_id, category_id) VALUES (:file_id, :category_id)";
-										$q     = $ysDBH->prepare($sql);
-										$q->execute(array(
-											':file_id'          => $row['image_id'],
-											':category_id'      => (int)$row['image_category_id'],
-										));
-									} catch(PDOException $e)
-									{
-										echo "Error " . $e->getMessage();
-									}
-								}
-
-								try
-								{
-									// add meta record
-									$sql   = "INSERT INTO plugin_imageviewer_meta (file_id, width, height, raw_data, date_taken) VALUES (:file_id, :width, :height, :raw_data, :date_taken)";
-									$q     = $ysDBH->prepare($sql);
-									$q->execute(array(
-										':file_id'    => $row['image_id'],
-										':width'      => (int)$row['image_width'],
-										':height'     => (int)$row['image_height'],
-										':raw_data'   => $row['image_original_exifdata'],
-										':date_taken' => $row['image_date'],
-									));
-								} catch(PDOException $e)
-								{
-									echo "Error " . $e->getMessage();
-								}
-
-                                if ($count)
-                                {
-                                    $success++;
-                                }
-                                else
-                                {
-                                    $error++;
-                                }
-                            }
+                            $rs = migrateImages($chevDBH, $ysDBH);
                             ?>
                             <tr>
                                 <td>Images:</td>
                                 <td><?php echo $chevStats['totalFiles']; ?></td>
                                 <td>file:</td>
-                                <td><?php echo $success; ?></td>
-                                <td><?php echo $error; ?></td>
+                                <td><?php echo $rs['success']; ?></td>
+                                <td><?php echo $rs['error']; ?></td>
                             </tr>
                             <?php updateScreen(); ?>
 
                             <?php
                             // do users
-                            $getUsers = $chevDBH->query('SELECT user_id, user_is_admin, user_username, user_email, user_status, user_date FROM '.CHEVERETO_DB_TABLE_PREFIX.'users ORDER BY user_id DESC');
-                            $success  = 0;
-                            $error    = 0;
-                            while($row = $getUsers->fetch())
-                            {
-                                // insert into Reservo db
-                                $sql       = "INSERT INTO users (id, username, password, level_id, email, lastlogindate, lastloginip, status, datecreated, createdip, identifier, title, firstname, lastname) VALUES (:id, :username, :password, :level_id, :email, :lastlogindate, :lastloginip, :status, :datecreated, :createdip, :identifier, '', '', '')";
-                                $q         = $ysDBH->prepare($sql);
-                                $userLevel = 1;
-								$randomPassword = MD5(MD5(microtime().rand(10000,99999).microtime()));
-                                if ($row['user_is_admin'] == 1)
-                                {
-                                    $userLevel = 20;
-									if(isset($_REQUEST['admin_account_password']) && (strlen($_REQUEST['admin_account_password'])))
-									{
-										$randomPassword = MD5($_REQUEST['admin_account_password']);
-									}								
-                                }
-
-                                $status = 'active';
-                                if ($row['user_status'] == 'banned')
-                                {
-                                    $status = 'suspended';
-                                }
-								elseif ($row['user_status'] == 'awaiting-confirmation')
-                                {
-                                    $status = 'pending';
-                                }
-								elseif ($row['user_status'] == 'awaiting-email')
-                                {
-                                    $status = 'pending';
-                                }
-								
-								// get password information
-								$loginDate = null;
-								$loginIp = null;
-								$getUserPassword = $chevDBH->query('SELECT login_date, login_ip FROM '.CHEVERETO_DB_TABLE_PREFIX.'logins WHERE login_user_id = '.$row['user_id'].' AND login_type = \'password\' LIMIT 1');
-								$passwordRow = $getUserPassword->fetch();
-								if($passwordRow)
-								{
-									$loginDate = $passwordRow['login_date'];
-									$loginIp = $passwordRow['login_ip'];
-								}
-
-								try
-								{
-									$count = $q->execute(array(
-										':id'             => $row['user_id'],
-										':username'       => $row['user_username'],
-										':password'       => $randomPassword,
-										':level_id'       => $userLevel,
-										':email'          => $row['user_email'],
-										':lastlogindate'  => $loginDate,
-										':lastloginip'    => $loginIp,
-										':status'         => $status,
-										':datecreated'    => $row['user_date'],
-										':createdip'      => long2Ip32bit($row['usr_lastip']),
-										':identifier'     => MD5(microtime() . $row['user_id'] . microtime()),
-									));
-								} catch(PDOException $e)
-								{
-									echo "Error " . $e->getMessage();
-								}
-
-								if($q->errorCode() == 0)
-								{
-                                    $success++;
-                                }
-                                else
-                                {
-									if($error < 100)
-									{
-										$errorLocal = $q->errorInfo();
-										echo 'Skipped Row: '.$errorLocal[2]."<br/>";
-									}
-									if($error == 100)
-									{
-										echo "<strong>... [truncated insert errors to first 100]</strong><br/>";
-									}
-                                    $error++;
-                                }
-                            }
+                            $rs = migrateUsers($chevDBH, $ysDBH, $_REQUEST['admin_account_password']);
                             ?>
                             <tr>
                                 <td>Users:</td>
                                 <td><?php echo $chevStats['totalUsers']; ?></td>
                                 <td>users:</td>
-                                <td><?php echo $success; ?></td>
-                                <td><?php echo $error; ?></td>
+                                <td><?php echo $rs['success']; ?></td>
+                                <td><?php echo $rs['error']; ?></td>
                             </tr>
                             <?php updateScreen(); ?>
 
                             <?php
                             // do albums
-                            $getFolders = $chevDBH->query('SELECT album_id, album_name, album_user_id, album_privacy, album_date FROM '.CHEVERETO_DB_TABLE_PREFIX.'albums');
-                            $success    = 0;
-                            $error      = 0;
-                            while($row = $getFolders->fetch())
-                            {
-								$isPublic = 2;
-								if($row['album_privacy'] != 'public')
-								{
-									$isPublic = 0;
-								}
-								
-								try
-								{
-									// insert into Reservo db
-									$sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added) VALUES (:id, :userId, :folderName, :isPublic, :date_added)";
-									$q     = $ysDBH->prepare($sql);
-									$count = $q->execute(array(
-										':id'         => $row['album_id'],
-										':userId'     => $row['album_user_id'],
-										':folderName' => $row['album_name'],
-										':isPublic'   => $isPublic,
-										':date_added' => $row['album_date'],
-									));
-								} catch(PDOException $e)
-								{
-									echo "Error " . $e->getMessage();
-								}
-
-                                if ($count)
-                                {
-                                    $success++;
-                                }
-                                else
-                                {
-                                    $error++;
-                                }
-                            }
+                            $rs = migrateAlbums($chevDBH, $ysDBH);
                             ?>
                             <tr>
                                 <td>Albums:</td>
                                 <td><?php echo $chevStats['totalFolders']; ?></td>
                                 <td>file_folder:</td>
-                                <td><?php echo $success; ?></td>
-                                <td><?php echo $error; ?></td>
+                                <td><?php echo $rs['success']; ?></td>
+                                <td><?php echo $rs['error']; ?></td>
                             </tr>
                             <?php updateScreen();?>
 
                             <?php
                             // do ip bans
-                            $getIpBans = $chevDBH->query('SELECT ip_ban_id, ip_ban_date, ip_ban_expires, ip_ban_ip, ip_ban_message FROM '.CHEVERETO_DB_TABLE_PREFIX.'ip_bans');
-                            $success     = 0;
-                            $error       = 0;
-                            while($row = $getIpBans->fetch())
-                            {
-								// insert row
-								$sql   = "INSERT INTO banned_ips (id, ipAddress, dateBanned, banType, banNotes, banExpiry) VALUES (:id, :ipAddress, :dateBanned, :banType, :banNotes, :banExpiry)";
-                                $q     = $ysDBH->prepare($sql);
-                                $count = $q->execute(array(
-                                    ':id'            => $row['ip_ban_id'],
-                                    ':ipAddress'       => $row['ip_ban_ip'],
-                                    ':dateBanned'  => $row['ip_ban_date'],
-                                    ':banType'        => 'Whole Site',
-									':banNotes' => $row['ip_ban_message'],
-									':banExpiry' => $row['ip_ban_expires'],
-                                ));
-
-                                if ($count)
-                                {
-                                    $success++;
-                                }
-                                else
-                                {
-                                    $error++;
-                                }
-                            }
+                            $rs = migrateIpBans($chevDBH, $ysDBH);
                             ?>
                             <tr>
                                 <td>Ip Bans:</td>
                                 <td><?php echo $chevStats['totalIpBans']; ?></td>
                                 <td>banned_ips:</td>
-                                <td><?php echo $success; ?></td>
-                                <td><?php echo $error; ?></td>
+                                <td><?php echo $rs['success']; ?></td>
+                                <td><?php echo $rs['error']; ?></td>
                             </tr>
                             <?php updateScreen(); ?>
 							
 							<?php
                             // do categories
-                            $getIpBans = $chevDBH->query('SELECT category_id, category_name, category_url_key FROM '.CHEVERETO_DB_TABLE_PREFIX.'categories');
-                            $success     = 0;
-                            $error       = 0;
-                            while($row = $getIpBans->fetch())
-                            {
-								// insert row
-								$sql   = "INSERT INTO plugin_imageviewer_category (id, key, label) VALUES (:id, :key, :label)";
-                                $q     = $ysDBH->prepare($sql);
-                                $count = $q->execute(array(
-                                    ':id'            => $row['category_id'],
-                                    ':key'       => $row['category_url_key'],
-                                    ':label'  => $row['category_name'],
-                                ));
-
-                                if ($count)
-                                {
-                                    $success++;
-                                }
-                                else
-                                {
-                                    $error++;
-                                }
-                            }
+                            $rs = migrateCategories($chevDBH, $ysDBH);
                             ?>
                             <tr>
                                 <td>Categories:</td>
                                 <td><?php echo $chevStats['totalCategories']; ?></td>
                                 <td>plugin_imageviewer_category:</td>
-                                <td><?php echo $success; ?></td>
-                                <td><?php echo $error; ?></td>
+                                <td><?php echo $rs['success']; ?></td>
+                                <td><?php echo $rs['error']; ?></td>
                             </tr>
                             <?php updateScreen(); ?>
 
@@ -771,6 +503,36 @@ define('PAGE_TITLE', 'Chevereto 3.12.10+ => Reservo Migration Tool');
 <?php
 
 // local functions
+function getTotalChevFilesCount($chevDBH) {
+	$getFiles               = $chevDBH->query('SELECT COUNT(image_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'images');
+	$row                    = $getFiles->fetchObject();
+	return (int) $row->total;
+}
+
+function getTotalChevUsersCount($chevDBH) {
+	$getUsers               = $chevDBH->query('SELECT COUNT(user_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'users');
+	$row                    = $getUsers->fetchObject();
+	return (int) $row->total;
+}
+
+function getTotalChevFoldersCount($chevDBH) {
+	$getFolders               = $chevDBH->query('SELECT COUNT(album_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'albums');
+	$row                      = $getFolders->fetchObject();
+	return (int) $row->total;
+}
+
+function getTotalChevBannedIpsCount($chevDBH) {
+	$getIpBans               = $chevDBH->query('SELECT COUNT(ip_ban_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'ip_bans');
+	$row                     = $getIpBans->fetchObject();
+	return (int) $row->total;
+}
+
+function getTotalChevCategoriesCount($chevDBH) {
+	$getCategories               = $chevDBH->query('SELECT COUNT(category_id) AS total FROM '.CHEVERETO_DB_TABLE_PREFIX.'categories');
+	$row                     = $getCategories->fetchObject();
+	return (int) $row->total;
+}
+
 function updateScreen()
 {
     flush();
@@ -898,5 +660,427 @@ function createShortUrl($id)
 	}
 
 	return $out;
+}
+
+function deleteResevoData($ysDBH) {
+	$ysDBH->query('DELETE FROM download_tracker');
+	$ysDBH->query('DELETE FROM file');
+	$ysDBH->query('DELETE FROM file_folder');
+	$ysDBH->query('DELETE FROM payment_log');
+	$ysDBH->query('DELETE FROM sessions');
+	$ysDBH->query('DELETE FROM stats');
+	$ysDBH->query('DELETE FROM users');
+	$ysDBH->query('DELETE FROM banned_ips');
+	$ysDBH->query('DELETE FROM plugin_imageviewer_category');
+	$ysDBH->query('DELETE FROM plugin_imageviewer_category_file');
+	$ysDBH->query('DELETE FROM plugin_imageviewer_meta');
+	$ysDBH->query('DELETE FROM file_server');
+}
+
+function createLocalServerEntry($ysDBH) {
+	$sql   = "INSERT INTO `file_server` (`id`, `serverLabel`, `serverType`, `ipAddress`, `ftpPort`, `ftpUsername`, `ftpPassword`, `statusId`, `scriptRootPath`, `storagePath`, `fileServerDomainName`, `scriptPath`, `totalSpaceUsed`, `maximumStorageBytes`, `priority`, `routeViaMainSite`, `lastFileActionQueueProcess`, `serverConfig`) VALUES (1, 'Local Default', 'local', '', 0, '', NULL, 2, :scriptRootPath, 'files/', NULL, NULL, 0, 0, 0, 0, NULL, NULL);";
+	$q     = $ysDBH->prepare($sql);
+	$count = $q->execute(array(
+		':scriptRootPath' => getcwd(),
+	));
+}
+
+function migrateImages($chevDBH, $ysDBH, $showProgress = false) {
+	$rs = array();
+	$rs['success'] = 0;
+	$rs['error'] = 0;
+	$rowTracker = 0;
+	$getFiles       = $chevDBH->query('SELECT image_id, image_user_id, image_original_filename, image_extension, image_album_id, image_md5, image_views, image_size, image_uploader_ip, image_date, image_storage_id, image_name, image_storage_mode, image_original_exifdata, image_width, image_height, image_category_id FROM '.CHEVERETO_DB_TABLE_PREFIX.'images');
+	while($row = $getFiles->fetch())
+	{
+		$rowTracker++;
+		if($rowTracker % OUTPUT_BATCH_SIZE === 0) {
+			echo $rowTracker."...";
+		}
+		
+		$image_storage_mode = $row['image_storage_mode'];
+		$filePrefix = '';
+		switch($image_storage_mode)
+		{
+			case 'datefolder':
+				$filePrefix = preg_replace('/(.*)(\s.*)/', '$1', str_replace('-', '/', $row['image_date'])).'/';
+				break;
+			case 'old':
+				$filePrefix = 'old/';
+				break;
+		}
+		$localFilePath = $filePrefix.$row['image_name'].'.'.$row['image_extension'];
+
+		// insert into Reservo db
+		$sql   = "INSERT INTO file (id, originalFilename, shortUrl, fileType, extension, fileSize, localFilePath, userId, totalDownload, uploadedIP, uploadedDate, status, visits, lastAccessed, deleteHash, folderId, serverId, accessPassword, apikey) VALUES (:id, :originalFilename, :shortUrl, :fileType, :extension, :fileSize, :localFilePath, :userId, :totalDownload, :uploadedIP, :uploadedDate, :status, :visits, :lastAccessed, :deleteHash, :folderId, :serverId, :accessPassword, '')";
+		$q     = $ysDBH->prepare($sql);
+		try
+		{
+
+			$count = $q->execute(array(
+				':id'               => $row['image_id'],
+				':originalFilename' => $row['image_original_filename'],
+				':shortUrl'         => createShortUrl($row['image_id']),
+				':fileType'         => guess_mime_type($row['image_original_filename']),
+				':extension'        => strtolower($row['image_extension']),
+				':fileSize'         => $row['image_size'],
+				':localFilePath'    => $localFilePath,
+				':userId'           => ((int)$row['image_user_id']==0?'null':$row['image_user_id']),
+				':totalDownload'    => $row['image_views'],
+				':uploadedIP'       => $row['image_uploader_ip'],
+				':uploadedDate'     => $row['image_date'],
+				':status'           => 'active',
+				':visits'           => $row['image_views'],
+				':lastAccessed'     => date('Y-m-d H:i:s', time()),
+				':deleteHash'       => MD5($row['image_md5'].$row['image_id'].rand(1000000,9999999)),
+				':folderId'         => $row['image_album_id'],
+				':serverId'         => $row['image_storage_id']==null?1:$row['image_storage_id'],
+				':accessPassword'   => null,
+			));
+		} catch(PDOException $e)
+		{
+			echo "Error " . $e->getMessage();
+		}
+
+		// add category record
+		if((int)$row['image_category_id'])
+		{
+			try
+			{
+				$sql   = "INSERT INTO plugin_imageviewer_category_file (file_id, category_id) VALUES (:file_id, :category_id)";
+				$q     = $ysDBH->prepare($sql);
+				$q->execute(array(
+					':file_id'          => $row['image_id'],
+					':category_id'      => (int)$row['image_category_id'],
+				));
+			} catch(PDOException $e)
+			{
+				echo "Error " . $e->getMessage();
+			}
+		}
+
+		try
+		{
+			// add meta record
+			$sql   = "INSERT INTO plugin_imageviewer_meta (file_id, width, height, raw_data, date_taken) VALUES (:file_id, :width, :height, :raw_data, :date_taken)";
+			$q     = $ysDBH->prepare($sql);
+			$q->execute(array(
+				':file_id'    => $row['image_id'],
+				':width'      => (int)$row['image_width'],
+				':height'     => (int)$row['image_height'],
+				':raw_data'   => $row['image_original_exifdata'],
+				':date_taken' => $row['image_date'],
+			));
+		} catch(PDOException $e)
+		{
+			echo "Error " . $e->getMessage();
+		}
+
+		if ($count)
+		{
+			$rs['success']++;
+		}
+		else
+		{
+			$rs['error']++;
+		}
+	}
+	
+	return $rs;
+}
+
+function migrateUsers($chevDBH, $ysDBH, $adminAccountPassword, $showProgress = false) {
+	$rs = array();
+	$rs['success'] = 0;
+	$rs['error'] = 0;
+	$rowTracker = 0;
+	$getUsers = $chevDBH->query('SELECT user_id, user_is_admin, user_username, user_email, user_status, user_date, user_registration_ip FROM '.CHEVERETO_DB_TABLE_PREFIX.'users ORDER BY user_id DESC');
+	$success  = 0;
+	$error    = 0;
+	while($row = $getUsers->fetch())
+	{
+		$rowTracker++;
+		if($rowTracker % OUTPUT_BATCH_SIZE === 0) {
+			echo $rowTracker."...";
+		}
+		
+		// insert into Reservo db
+		$sql       = "INSERT INTO users (id, username, password, level_id, email, lastlogindate, lastloginip, status, datecreated, createdip, identifier, title, firstname, lastname) VALUES (:id, :username, :password, :level_id, :email, :lastlogindate, :lastloginip, :status, :datecreated, :createdip, :identifier, '', '', '')";
+		$q         = $ysDBH->prepare($sql);
+		$userLevel = 1;
+		$randomPassword = MD5(MD5(microtime().rand(10000,99999).microtime()));
+		if ($row['user_is_admin'] == 1)
+		{
+			$userLevel = 20;
+			if(strlen($adminAccountPassword))
+			{
+				$randomPassword = MD5($adminAccountPassword);
+			}								
+		}
+
+		$status = 'active';
+		if ($row['user_status'] == 'banned')
+		{
+			$status = 'suspended';
+		}
+		elseif ($row['user_status'] == 'awaiting-confirmation')
+		{
+			$status = 'pending';
+		}
+		elseif ($row['user_status'] == 'awaiting-email')
+		{
+			$status = 'pending';
+		}
+		
+		// get password information
+		$loginDate = null;
+		$loginIp = null;
+		$getUserPassword = $chevDBH->query('SELECT login_date, login_ip FROM '.CHEVERETO_DB_TABLE_PREFIX.'logins WHERE login_user_id = '.$row['user_id'].' AND login_type = \'password\' LIMIT 1');
+		$passwordRow = $getUserPassword->fetch();
+		if($passwordRow)
+		{
+			$loginDate = $passwordRow['login_date'];
+			$loginIp = $passwordRow['login_ip'];
+		}
+
+		try
+		{
+			$count = $q->execute(array(
+				':id'             => $row['user_id'],
+				':username'       => $row['user_username'],
+				':password'       => $randomPassword,
+				':level_id'       => $userLevel,
+				':email'          => $row['user_email'],
+				':lastlogindate'  => $loginDate,
+				':lastloginip'    => $loginIp,
+				':status'         => $status,
+				':datecreated'    => $row['user_date'],
+				':createdip'      => $row['user_registration_ip'],
+				':identifier'     => MD5(microtime() . $row['user_id'] . microtime()),
+			));
+		} catch(PDOException $e)
+		{
+			echo "Error " . $e->getMessage();
+		}
+
+		if($q->errorCode() == 0)
+		{
+			$rs['success']++;
+		}
+		else
+		{
+			if($error < 100)
+			{
+				$errorLocal = $q->errorInfo();
+				echo 'Skipped Row: '.$errorLocal[2]."<br/>\n";
+			}
+			if($error == 100)
+			{
+				echo "<strong>... [truncated insert errors to first 100]</strong><br/>\n";
+			}
+			$rs['error']++;
+		}
+	}
+	
+	return $rs;
+}
+
+function migrateAlbums($chevDBH, $ysDBH, $showProgress = false) {
+	$rs = array();
+	$rs['success'] = 0;
+	$rs['error'] = 0;
+	$rowTracker = 0;
+	$getFolders = $chevDBH->query('SELECT album_id, album_name, album_user_id, album_privacy, album_date FROM '.CHEVERETO_DB_TABLE_PREFIX.'albums');
+	while($row = $getFolders->fetch())
+	{
+		$rowTracker++;
+		if($rowTracker % OUTPUT_BATCH_SIZE === 0) {
+			echo $rowTracker."...";
+		}
+		
+		$isPublic = 2;
+		if($row['album_privacy'] != 'public')
+		{
+			$isPublic = 0;
+		}
+		
+		try
+		{
+			// insert into Reservo db
+			$sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added) VALUES (:id, :userId, :folderName, :isPublic, :date_added)";
+			$q     = $ysDBH->prepare($sql);
+			$count = $q->execute(array(
+				':id'         => $row['album_id'],
+				':userId'     => $row['album_user_id'],
+				':folderName' => $row['album_name'],
+				':isPublic'   => $isPublic,
+				':date_added' => $row['album_date'],
+			));
+		} catch(PDOException $e)
+		{
+			echo "Error " . $e->getMessage();
+		}
+
+		if ($count)
+		{
+			$rs['success']++;
+		}
+		else
+		{
+			$rs['error']++;
+		}
+	}
+	
+	return $rs;
+}
+
+function migrateIpBans($chevDBH, $ysDBH, $showProgress = false) {
+	$rs = array();
+	$rs['success'] = 0;
+	$rs['error'] = 0;
+	$rowTracker = 0;
+	$getIpBans = $chevDBH->query('SELECT ip_ban_id, ip_ban_date, ip_ban_expires, ip_ban_ip, ip_ban_message FROM '.CHEVERETO_DB_TABLE_PREFIX.'ip_bans');
+	while($row = $getIpBans->fetch())
+	{
+		$rowTracker++;
+		if($rowTracker % OUTPUT_BATCH_SIZE === 0) {
+			echo $rowTracker."...";
+		}
+		
+		// insert row
+		$sql   = "INSERT INTO banned_ips (id, ipAddress, dateBanned, banType, banNotes, banExpiry) VALUES (:id, :ipAddress, :dateBanned, :banType, :banNotes, :banExpiry)";
+		$q     = $ysDBH->prepare($sql);
+		$count = $q->execute(array(
+			':id'            => $row['ip_ban_id'],
+			':ipAddress'       => $row['ip_ban_ip'],
+			':dateBanned'  => $row['ip_ban_date'],
+			':banType'        => 'Whole Site',
+			':banNotes' => $row['ip_ban_message'],
+			':banExpiry' => $row['ip_ban_expires'],
+		));
+
+		if ($count)
+		{
+			$rs['success']++;
+		}
+		else
+		{
+			$rs['error']++;
+		}
+	}
+	
+	return $rs;
+}
+
+function migrateCategories($chevDBH, $ysDBH, $showProgress = false) {
+	$rs = array();
+	$rs['success'] = 0;
+	$rs['error'] = 0;
+	$rowTracker = 0;
+	$getIpBans = $chevDBH->query('SELECT category_id, category_name, category_url_key FROM '.CHEVERETO_DB_TABLE_PREFIX.'categories');
+	while($row = $getIpBans->fetch())
+	{
+		$rowTracker++;
+		if($rowTracker % OUTPUT_BATCH_SIZE === 0) {
+			echo $rowTracker."...";
+		}
+		
+		// insert row
+		$sql   = "INSERT INTO plugin_imageviewer_category (id, key, label) VALUES (:id, :key, :label)";
+		$q     = $ysDBH->prepare($sql);
+		$count = $q->execute(array(
+			':id'            => $row['category_id'],
+			':key'       => $row['category_url_key'],
+			':label'  => $row['category_name'],
+		));
+
+		if ($count)
+		{
+			$rs['success']++;
+		}
+		else
+		{
+			$rs['error']++;
+		}
+	}
+	
+	return $rs;
+}
+
+function processCommandLineConversion($chevDBH, $ysDBH) {
+	echo "\n-----------------------------------------------------\n";
+	echo PAGE_TITLE."\n";
+	echo "-----------------------------------------------------\n";
+	echo "Getting Chevereto DB Stats...\n\n";
+	
+	// get stats
+	$chevStats = array();
+	$chevStats['totalFiles'] = getTotalChevFilesCount($chevDBH);
+	$chevStats['totalUsers'] = getTotalChevUsersCount($chevDBH);
+	$chevStats['totalFolders'] = getTotalChevFoldersCount($chevDBH);
+	$chevStats['totalIpBans'] = getTotalChevBannedIpsCount($chevDBH);
+	$chevStats['totalCategories'] = getTotalChevCategoriesCount($chevDBH);
+	
+	echo "- Images: ".$chevStats['totalFiles']."\n";
+	echo "- Users: ".$chevStats['totalUsers']."\n";
+	echo "- Albums: ".$chevStats['totalFolders']."\n";
+	echo "- Banned IPs: ".$chevStats['totalIpBans']."\n";
+	echo "- Total Categories: ".$chevStats['totalCategories']."\n";
+
+	echo "\nDo the above table counts look correct? If yes, please continue with the migration by typing 'y': ";
+	$handle = fopen ("php://stdin","r");
+	$line = fgets($handle);
+	if(trim($line) != 'y'){
+		echo "ABORTING MIGRATION!\n";
+		exit;
+	}
+	fclose($handle);
+	
+	// prompt for the admin password
+	echo "\nUsers Passwords: These can not be migrated as they are one-way encoded. Your users will be set a long random password on their migrated account, they should use the password reset form via the Reservo script to re-gain access to their account. If you enter your exiting Chevereto admin password, we'll setup the admin account password for you: ";
+	$handle = fopen ("php://stdin","r");
+	$line = fgets($handle);
+	$adminAccountPassword = trim($line);
+	fclose($handle);
+
+	echo "\n\n-----------------------------------------------------\n";
+	echo "Starting Migration...\n";
+	echo "-----------------------------------------------------\n";
+	
+	echo "Clearing existing Reservo data...";
+	deleteResevoData($ysDBH);
+	echo " done.\n";
+	
+	echo "Clearing local server entry...";
+	createLocalServerEntry($ysDBH);
+	echo " done.\n";
+	
+	echo "Migrating ".$chevStats['totalFiles']." Images...";
+	$rs = migrateImages($chevDBH, $ysDBH, true);
+	echo " done. (success: ".$rs['success'].", error: ".$rs['error'].")\n";
+
+	echo "Migrating ".$chevStats['totalUsers']." Users...";
+	$rs = migrateUsers($chevDBH, $ysDBH, $adminAccountPassword, true);
+	echo " done. (success: ".$rs['success'].", error: ".$rs['error'].")\n";
+	
+	echo "Migrating ".$chevStats['totalFolders']." Albums...";
+	$rs = migrateAlbums($chevDBH, $ysDBH, true);
+	echo " done. (success: ".$rs['success'].", error: ".$rs['error'].")\n";
+	
+	echo "Migrating ".$chevStats['totalIpBans']." IP Bans...";
+	$rs = migrateIpBans($chevDBH, $ysDBH, true);
+	echo " done. (success: ".$rs['success'].", error: ".$rs['error'].")\n";
+	
+	echo "Migrating ".$chevStats['totalCategories']." Categories...";
+	$rs = migrateCategories($chevDBH, $ysDBH, true);
+	echo " done. (success: ".$rs['success'].", error: ".$rs['error'].")\n";
+	
+	echo "-----------------------------------------------------\n";
+	echo "Migration Finished.\n";
+	echo "-----------------------------------------------------\n\n";
+	
+	echo "Now copy your Chevereto images on your server into the /files/ folder within Reservo, retaining any directory structure. Note that your admin login to Reservo will be updated to the one you set at the start of this process.\n\n";
+	echo "IMPORTANT: When you are finished, ensure you remove this file from your server.\n";
+	echo "-----------------------------------------------------\n\n";
 }
 ?>
