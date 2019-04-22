@@ -2,14 +2,20 @@
 
 * Created By: Adam Wilson - Reservo.co
 * Website: https://reservo.co
-* Release Date: 2nd April 2019
-* Version: 1.1
+* Release Date: 22nd April 2019
+* Version: 1.2
 
-#USAGE:
+#WEB USAGE:
 
 * Upload "migrate.php" to your Reservo installation in the root.
 * Edit migrate.php at the top. Set your Chevereto database details and database table prefix. (found in app/settings.php)
 * Save and open the script within your browser.
+
+#CLI USAGE (recommended for larger sites):
+
+* Upload "migrate.php" to your Reservo installation in the root.
+* Edit migrate.php at the top. Set your Chevereto database details and database table prefix. (found in app/settings.php)
+* Save and call the script via SSH like this - "php migrate.php"
 
 
 #SUPPORT:
