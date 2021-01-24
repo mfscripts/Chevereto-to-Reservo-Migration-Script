@@ -907,7 +907,7 @@ function migrateAlbums($chevDBH, $ysDBH, $showProgress = false) {
 		try
 		{
 			// insert into Reservo db
-			$sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added) VALUES (:id, :userId, :folderName, :isPublic, :date_added)";
+			$sql   = "INSERT INTO file_folder (id, userId, folderName, isPublic, date_added, urlHash) VALUES (:id, :userId, :folderName, :isPublic, :date_added, MD5(CONCAT(NOW(), RAND(), UUID())))";
 			$q     = $ysDBH->prepare($sql);
 			$count = $q->execute(array(
 				':id'         => $row['album_id'],
